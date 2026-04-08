@@ -39,7 +39,7 @@ CONFIG = {
     "PRIVATE_KEY_COLUMN": "私钥",
 
     # 主钱包私钥（Base58），归集目标
-    "MAIN_WALLET_KEY": "4Eyeh9ygw5vVNnWrD15GHihrJSbFj2U1X7oUaHyvye9TfMvE2dXXaaE1a2JCBvtHmVdNZQbaWVG6Scy1fezJa3Vx",
+    "MAIN_WALLET_KEY": "填写你的主钱包私钥",
 
     # 每个钱包保留的最低 lamports（Solana 账户最低要求约 890880）
     # 设为 0 则尝试转走全部（账户可能被系统回收，一般无影响）
