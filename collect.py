@@ -1,9 +1,9 @@
 """
 Solana 钱包余额查询 + 归集工具
 功能：
-  1. 从 Excel/CSV 读取私钥列表
+  1. 从 Excel/CSV 读取子钱包私钥列表
   2. 查询每个钱包余额
-  3. 将余额归集到主钱包（保留最低租金豁免）
+  3. 将余额归集到主钱包（从另一个表格读取主钱包地址）
 
 安装依赖: pip install solders base58 pandas openpyxl aiohttp
 运行:     python collect.py
@@ -32,16 +32,20 @@ CONFIG = {
     # RPC 节点，推荐 Helius 免费节点
     "RPC_URL": "https://mainnet.helius-rpc.com/?api-key=填入https://dashboard.helius.dev/的kye",
 
-    # 私钥文件（Excel 或 CSV）
+    # 子钱包私钥文件（Excel 或 CSV）
     "EXCEL_FILE": "wallets.xlsx",
 
-    # 私钥列名
+    # 子钱包私钥列名
     "PRIVATE_KEY_COLUMN": "私钥",
 
-    # 主钱包私钥（Base58），归集目标
-    "MAIN_WALLET_KEY": "填写你的主钱包私钥",
+    # ========== 新增：主钱包地址表格配置 ==========
+    # 存放主钱包地址的文件（仅需公钥，无需私钥）
+    "MAIN_ADDRESS_FILE": "main_address.xlsx",
+    # 主钱包地址所在的列名
+    "MAIN_ADDRESS_COLUMN": "地址",
+    # ===========================================
 
-    # 每个钱包保留的最低 lamports（Solana 账户最低要求约 890880）
+    # 每个子钱包保留的最低 lamports（Solana 账户最低要求约 890880）
     # 设为 0 则尝试转走全部（账户可能被系统回收，一般无影响）
     "KEEP_LAMPORTS": 5000,
 
@@ -57,6 +61,7 @@ LAMPORTS_PER_SOL = 1_000_000_000
 
 
 def load_keypair(raw: str) -> Keypair:
+    """加载子钱包私钥，支持 Base58 或 JSON 数组格式"""
     raw = str(raw).strip()
     try:
         return Keypair.from_bytes(base58.b58decode(raw))
@@ -70,6 +75,7 @@ def load_keypair(raw: str) -> Keypair:
 
 
 def load_wallets(filepath: str, column: str) -> list[str]:
+    """从 Excel/CSV 读取子钱包私钥列表"""
     import os
     if not os.path.exists(filepath):
         print(f"❌ 找不到文件: {filepath}")
@@ -98,6 +104,33 @@ def load_wallets(filepath: str, column: str) -> list[str]:
                 raise ValueError(f'找不到列 "{column}"，现有列: {list(df.columns)}')
 
     return df[column].dropna().astype(str).str.strip().tolist()
+
+
+def load_main_address(filepath: str, column: str) -> str:
+    """从单独表格读取主钱包地址（公钥字符串）"""
+    import os
+    if not os.path.exists(filepath):
+        print(f"❌ 找不到主钱包地址文件: {filepath}")
+        sys.exit(1)
+    if filepath.endswith(('.xlsx', '.xls')):
+        df = pd.read_excel(filepath)
+    else:
+        for enc in ['utf-8', 'gbk', 'gb2312', 'latin1']:
+            try:
+                df = pd.read_csv(filepath, encoding=enc)
+                break
+            except UnicodeDecodeError:
+                continue
+    if column not in df.columns:
+        raise ValueError(f'找不到列 "{column}"，现有列: {list(df.columns)}')
+    # 取第一行第一列的值作为主钱包地址
+    addr = df[column].iloc[0].strip()
+    # 简单验证公钥格式
+    try:
+        Pubkey.from_string(addr)
+    except Exception:
+        raise ValueError(f"无效的 Solana 公钥: {addr}")
+    return addr
 
 
 class Collector:
@@ -153,23 +186,23 @@ class Collector:
         print("       Solana 钱包余额归集工具")
         print("═" * 52)
 
-        if not CONFIG["MAIN_WALLET_KEY"]:
-            print("❌ 请先在 CONFIG 中填入 MAIN_WALLET_KEY（主钱包私钥）")
-            sys.exit(1)
+        # 读取主钱包地址（只需公钥）
+        main_addr = load_main_address(
+            CONFIG["MAIN_ADDRESS_FILE"],
+            CONFIG["MAIN_ADDRESS_COLUMN"]
+        )
+        main_pubkey = Pubkey.from_string(main_addr)
+        print(f"\n主钱包地址: {main_addr}")
 
-        main_kp = load_keypair(CONFIG["MAIN_WALLET_KEY"])
-        main_addr = str(main_kp.pubkey())
-        print(f"\n主钱包: {main_addr}")
-
-        # 读取钱包列表
+        # 读取子钱包私钥列表
         raw_keys = load_wallets(CONFIG["EXCEL_FILE"], CONFIG["PRIVATE_KEY_COLUMN"])
-        print(f"读取到 {len(raw_keys)} 个钱包\n")
+        print(f"读取到 {len(raw_keys)} 个子钱包私钥\n")
 
         wallets: list[Keypair] = []
         for raw in raw_keys:
             try:
                 kp = load_keypair(raw)
-                # 跳过主钱包本身
+                # 可选：跳过与主钱包地址相同的子钱包（一般不会发生，因为主钱包只有地址没有私钥）
                 if str(kp.pubkey()) != main_addr:
                     wallets.append(kp)
             except Exception as e:
@@ -177,7 +210,7 @@ class Collector:
 
         # ── 查询余额 ──────────────────────────────────────────────────────────
         print(f"{'━'*52}")
-        print("  查询钱包余额")
+        print("  查询子钱包余额")
         print(f"{'━'*52}\n")
 
         wallet_info = []
@@ -207,14 +240,14 @@ class Collector:
         print(f"\n📊 查询完成")
         print(f"   总余额:     {total_balance/LAMPORTS_PER_SOL:.6f} SOL")
         print(f"   可归集:     {total_transferable/LAMPORTS_PER_SOL:.6f} SOL")
-        print(f"   有余额钱包: {len(to_transfer)} 个\n")
+        print(f"   有余额子钱包: {len(to_transfer)} 个\n")
 
         if not to_transfer:
             print("✅ 没有可归集的余额，程序结束。")
             return
 
         # ── 确认并归集 ────────────────────────────────────────────────────────
-        confirm = input(f"  确认将 {len(to_transfer)} 个钱包余额归集到主钱包？(yes/no): ").strip().lower()
+        confirm = input(f"  确认将 {len(to_transfer)} 个子钱包余额归集到主钱包？(yes/no): ").strip().lower()
         if confirm not in ("yes", "y"):
             print("\n已取消。")
             return
@@ -230,7 +263,7 @@ class Collector:
             lamports = w["transferable"]
 
             try:
-                sig = await self.transfer(kp, main_kp.pubkey(), lamports)
+                sig = await self.transfer(kp, main_pubkey, lamports)
                 grand_total += lamports
                 print(f"  ✅ {short}  转出 {lamports/LAMPORTS_PER_SOL:.6f} SOL  sig: {sig[:16]}...")
                 results.append({
@@ -259,12 +292,16 @@ class Collector:
             df.to_excel(out, index=False)
             print(f"\n📊 结果已保存: {out}")
 
-        final = await self.get_balance(main_kp.pubkey())
-        print(f"\n{'═'*52}")
-        print(f"  ✅ 归集完成")
-        print(f"  本次归集:       {grand_total/LAMPORTS_PER_SOL:.6f} SOL")
-        print(f"  主钱包当前余额: {final/LAMPORTS_PER_SOL:.6f} SOL")
-        print(f"{'═'*52}\n")
+        # 可选：查询主钱包最终余额（需要 RPC 支持，无需私钥）
+        try:
+            final = await self.get_balance(main_pubkey)
+            print(f"\n{'═'*52}")
+            print(f"  ✅ 归集完成")
+            print(f"  本次归集:       {grand_total/LAMPORTS_PER_SOL:.6f} SOL")
+            print(f"  主钱包当前余额: {final/LAMPORTS_PER_SOL:.6f} SOL")
+            print(f"{'═'*52}\n")
+        except Exception as e:
+            print(f"\n⚠️  无法查询主钱包余额（RPC 可能限速），但归集操作已完成。错误: {e}")
 
 
 async def main():
